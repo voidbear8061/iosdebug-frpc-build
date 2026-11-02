@@ -8,12 +8,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
-      - name: Build frpc for iOS/arm64
+      - name: Build frpc for iOS device (iphoneos SDK)
         run: |
+          # 自制真机 wrapper：官方 clangwrap.sh 默认 iphonesimulator（模拟器平台），
+          # 真机必须用 iphoneos SDK + -miphoneos-version-min
+          cat > ccwrap.sh <<'W'
+#!/bin/sh
+SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+CLANG=$(xcrun --sdk iphoneos --find clang)
+exec "$CLANG" -arch arm64 -isysroot "$SDK" -miphoneos-version-min=14.0 "$@"
+W
+          chmod +x ccwrap.sh
           git clone --depth 1 -b v0.61.1 https://github.com/fatedier/frp.git frp
           cd frp
-          # 显式 iPhoneOS target：保证 LC_BUILD_VERSION platform=iOS、iOS 风格 install-name
-          CC="$(go env GOROOT)/misc/ios/clangwrap.sh -target arm64-apple-ios14.0"           CGO_ENABLED=1 GOOS=ios GOARCH=arm64           go build -trimpath -ldflags="-s -w" -o ../frpc-ios ./cmd/frpc
+          CC="$(cd .. && pwd)/ccwrap.sh"           CGO_ENABLED=1 GOOS=ios GOARCH=arm64           go build -trimpath -ldflags="-s -w" -o ../frpc-ios ./cmd/frpc
           otool -l ../frpc-ios | grep -A4 LC_BUILD_VERSION || true
           file ../frpc-ios
       - name: Pseudo-sign
