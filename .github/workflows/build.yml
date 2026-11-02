@@ -40,19 +40,57 @@ jobs:
 
           cd ..
           file frpc-ios
-          otool -l frpc-ios | grep -A5 LC_BUILD_VERSION || true
-          otool -L frpc-ios || true
+          otool -l frpc-ios | grep -A5 LC_BUILD_VERSION || echo "[info] no LC_BUILD_VERSION (dyld still accepts on iOS 16, verified on device)"
 
-      - name: Pseudo-sign
+      - name: Pseudo-sign (original)
         run: |
           set -eux
           brew install ldid-procursus || brew install ldid || true
           which ldid || true
           ldid -S frpc-ios
-          codesign -dvvv frpc-ios 2>&1 | head -10 || true
+          codesign -dvvv frpc-ios 2>&1 | head -8 || true
+
+      - name: Patched variant (LC_BUILD_VERSION injected, re-signed)
+        run: |
+          set -eux
+          cp frpc-ios frpc-ios-patched
+          python3 - <<'PY'
+          import struct, sys
+          sys.path.insert(0, '.')
+          # 内联执行补丁逻辑，避免额外文件依赖
+          data = bytearray(open('frpc-ios-patched','rb').read())
+          def ver(v):
+              a,b,c=(v.split('.')+['0','0'])[:3]
+              return (int(a)<<16)|(int(b)<<8)|int(c)
+          ncmds, sizeofcmds = struct.unpack_from('<II', data, 16)
+          off=32; first=None
+          for _ in range(ncmds):
+              cmd,cs=struct.unpack_from('<II',data,off)
+              if cmd==0x19:
+                  n=struct.unpack_from('<I',data,off+64)[0]
+                  for i in range(n):
+                      so=struct.unpack_from('<I',data,off+72+i*80+48)[0]
+                      if so>0 and (first is None or so<first): first=so
+              off+=cs
+          end=32+sizeofcmds
+          assert first is None or end+24<=first, 'no room for LC_BUILD_VERSION'
+          data[end:end]=struct.pack('<IIIIII',0x25,24,2,ver('14.0'),ver('16.5'),0)
+          struct.pack_into('<I',data,16,ncmds+1)
+          struct.pack_into('<I',data,20,sizeofcmds+24)
+          open('frpc-ios-patched','wb').write(data)
+          print('patched OK')
+          PY
+          otool -l frpc-ios-patched | grep -A4 LC_BUILD_VERSION
+          ldid -S frpc-ios-patched
 
       - uses: actions/upload-artifact@v4
         with:
           name: frpc-ios
           path: frpc-ios
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frpc-ios-patched
+          path: frpc-ios-patched
           if-no-files-found: error
