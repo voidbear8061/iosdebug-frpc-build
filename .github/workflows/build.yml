@@ -12,7 +12,9 @@ jobs:
         run: |
           git clone --depth 1 -b v0.61.1 https://github.com/fatedier/frp.git frp
           cd frp
-          CC="$(go env GOROOT)/misc/ios/clangwrap.sh"           CGO_ENABLED=1 GOOS=ios GOARCH=arm64           go build -trimpath -ldflags="-s -w" -o ../frpc-ios ./cmd/frpc
+          # 显式 iPhoneOS target：保证 LC_BUILD_VERSION platform=iOS、iOS 风格 install-name
+          CC="$(go env GOROOT)/misc/ios/clangwrap.sh -target arm64-apple-ios14.0"           CGO_ENABLED=1 GOOS=ios GOARCH=arm64           go build -trimpath -ldflags="-s -w" -o ../frpc-ios ./cmd/frpc
+          otool -l ../frpc-ios | grep -A4 LC_BUILD_VERSION || true
           file ../frpc-ios
       - name: Pseudo-sign
         run: |
