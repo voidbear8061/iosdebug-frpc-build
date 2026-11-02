@@ -11,86 +11,61 @@ jobs:
         with:
           go-version: "1.23"
 
-      - name: Build frpc for iOS device (iphoneos SDK)
+      - name: Build frpc for iOS device (CGO disabled, static)
         run: |
           set -eux
-          # 官方 misc/ios/clangwrap.sh 默认 iphonesimulator（模拟器平台），
-          # 真机必须用 iphoneos SDK + -miphoneos-version-min。
-          # 用 printf 生成 wrapper（heredoc 顶格会破坏 YAML 块标量）。
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          CLANG=$(xcrun --sdk iphoneos --find clang)
-          echo "SDK=$SDK"
-          echo "CLANG=$CLANG"
-
-          printf '%s\n' '#!/bin/sh' \
-            'exec "'"$CLANG"'" -arch arm64 -isysroot "'"$SDK"'" -miphoneos-version-min=14.0 "$@"' \
-            > ccwrap.sh
-          chmod +x ccwrap.sh
-          cat ccwrap.sh
-
+          # CGO_ENABLED=0: 纯 Go 静态二进制，不链接 CoreFoundation/libresolv，
+          # 从根源消除 launchd 直拉时的 dyld "wrong platform" 与 dylib 依赖问题。
           git clone --depth 1 -b v0.61.1 https://github.com/fatedier/frp.git frp
           cd frp
-
-          export CC="$(cd .. && pwd)/ccwrap.sh"
-          export CGO_ENABLED=1
+          export CGO_ENABLED=0
           export GOOS=ios
           export GOARCH=arm64
-          export CGO_CFLAGS="-Wno-nullability-completeness -Wno-error"
           go build -trimpath -ldflags="-s -w" -o ../frpc-ios ./cmd/frpc
-
           cd ..
           file frpc-ios
-          otool -l frpc-ios | grep -A5 LC_BUILD_VERSION || echo "[info] no LC_BUILD_VERSION (dyld still accepts on iOS 16, verified on device)"
+          otool -L frpc-ios | head -5 || true
+          otool -l frpc-ios | grep -A5 LC_BUILD_VERSION || echo "[info] no LC_BUILD_VERSION -> will inject"
 
-      - name: Pseudo-sign (original)
+      - name: Inject LC_BUILD_VERSION (iOS) and pseudo-sign
         run: |
           set -eux
-          brew install ldid-procursus || brew install ldid || true
-          which ldid || true
-          ldid -S frpc-ios
-          codesign -dvvv frpc-ios 2>&1 | head -8 || true
-
-      - name: Patched variant (LC_BUILD_VERSION injected, re-signed)
-        run: |
-          set -eux
-          cp frpc-ios frpc-ios-patched
           python3 - <<'PY'
-          import struct, sys
-          sys.path.insert(0, '.')
-          # 内联执行补丁逻辑，避免额外文件依赖
-          data = bytearray(open('frpc-ios-patched','rb').read())
+          import struct
+          data = bytearray(open('frpc-ios','rb').read())
           def ver(v):
               a,b,c=(v.split('.')+['0','0'])[:3]
               return (int(a)<<16)|(int(b)<<8)|int(c)
           ncmds, sizeofcmds = struct.unpack_from('<II', data, 16)
-          off=32; first=None
+          off=32; first=None; seen=0
           for _ in range(ncmds):
               cmd,cs=struct.unpack_from('<II',data,off)
+              if cmd==0x25:
+                  seen+=1
               if cmd==0x19:
                   n=struct.unpack_from('<I',data,off+64)[0]
                   for i in range(n):
                       so=struct.unpack_from('<I',data,off+72+i*80+48)[0]
                       if so>0 and (first is None or so<first): first=so
               off+=cs
-          end=32+sizeofcmds
-          assert first is None or end+24<=first, 'no room for LC_BUILD_VERSION'
-          data[end:end]=struct.pack('<IIIIII',0x25,24,2,ver('14.0'),ver('16.5'),0)
-          struct.pack_into('<I',data,16,ncmds+1)
-          struct.pack_into('<I',data,20,sizeofcmds+24)
-          open('frpc-ios-patched','wb').write(data)
-          print('patched OK')
+          if not seen:
+              end=32+sizeofcmds
+              assert first is None or end+24<=first, 'no room for LC_BUILD_VERSION'
+              data[end:end]=struct.pack('<IIIIII',0x25,24,2,ver('14.0'),ver('16.5'),0)
+              struct.pack_into('<I',data,16,ncmds+1)
+              struct.pack_into('<I',data,20,sizeofcmds+24)
+              open('frpc-ios','wb').write(data)
+              print('injected LC_BUILD_VERSION OK')
+          else:
+              print('LC_BUILD_VERSION already present')
           PY
-          otool -l frpc-ios-patched | grep -A4 LC_BUILD_VERSION
-          ldid -S frpc-ios-patched
+          otool -l frpc-ios | grep -A4 LC_BUILD_VERSION
+          brew install ldid-procursus || brew install ldid || true
+          ldid -S frpc-ios
+          codesign -dvvv frpc-ios 2>&1 | head -8 || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: frpc-ios
+          name: frpc-ios-static
           path: frpc-ios
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frpc-ios-patched
-          path: frpc-ios-patched
           if-no-files-found: error
