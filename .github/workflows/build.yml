@@ -14,12 +14,12 @@ jobs:
       - name: Build frpc for iOS device (CGO disabled, static)
         run: |
           set -eux
-          # CGO_ENABLED=0: 纯 Go 静态二进制，不链接 CoreFoundation/libresolv，
-          # 从根源消除 launchd 直拉时的 dyld "wrong platform" 与 dylib 依赖问题。
+          # CGO_ENABLED=0 + GOOS=darwin: 纯 Go 静态二进制（Go 禁止 GOOS=ios 免 cgo，
+          # darwin/arm64 纯静态产物 + 注入 iOS 平台标记即可在真机 launchd 下加载）。
           git clone --depth 1 -b v0.61.1 https://github.com/fatedier/frp.git frp
           cd frp
           export CGO_ENABLED=0
-          export GOOS=ios
+          export GOOS=darwin
           export GOARCH=arm64
           go build -trimpath -ldflags="-s -w" -o ../frpc-ios ./cmd/frpc
           cd ..
