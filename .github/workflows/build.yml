@@ -1,33 +1,57 @@
 name: build-frpc-ios
 on: [push, workflow_dispatch]
+
 jobs:
   build:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"
+
       - name: Build frpc for iOS device (iphoneos SDK)
         run: |
-          # 自制真机 wrapper：官方 clangwrap.sh 默认 iphonesimulator（模拟器平台），
+          set -eux
+          # 官方 misc/ios/clangwrap.sh 默认 iphonesimulator（模拟器平台），
           # 真机必须用 iphoneos SDK + -miphoneos-version-min
-          cat > ccwrap.sh <<'W'
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CLANG=$(xcrun --sdk iphoneos --find clang)
+          echo "SDK=$SDK"
+          echo "CLANG=$CLANG"
+          "$CLANG" --version | head -3
+
+          cat > ccwrap.sh <<W
 #!/bin/sh
-SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-CLANG=$(xcrun --sdk iphoneos --find clang)
-exec "$CLANG" -arch arm64 -isysroot "$SDK" -miphoneos-version-min=14.0 "$@"
+exec "$CLANG" -arch arm64 -isysroot "$SDK" -miphoneos-version-min=14.0 "\$@"
 W
           chmod +x ccwrap.sh
+          cat ccwrap.sh
+
           git clone --depth 1 -b v0.61.1 https://github.com/fatedier/frp.git frp
           cd frp
-          CC="$(cd .. && pwd)/ccwrap.sh"           CGO_ENABLED=1 GOOS=ios GOARCH=arm64           go build -trimpath -ldflags="-s -w" -o ../frpc-ios ./cmd/frpc
-          otool -l ../frpc-ios | grep -A4 LC_BUILD_VERSION || true
-          file ../frpc-ios
+
+          export CC="$(cd .. && pwd)/ccwrap.sh"
+          export CGO_ENABLED=1
+          export GOOS=ios
+          export GOARCH=arm64
+          export CGO_CFLAGS="-Wno-nullability-completeness -Wno-error"
+          go build -trimpath -ldflags="-s -w" -o ../frpc-ios ./cmd/frpc
+
+          cd ..
+          file frpc-ios
+          otool -l frpc-ios | grep -A5 LC_BUILD_VERSION || true
+          otool -L frpc-ios || true
+
       - name: Pseudo-sign
         run: |
-          brew install ldid-procursus
+          set -eux
+          brew install ldid-procursus || brew install ldid || true
+          which ldid || ls /opt/homebrew/bin/ldid /usr/local/bin/ldid || true
           ldid -S frpc-ios
+          codesign -dvvv frpc-ios 2>&1 | head -10 || true
+
       - uses: actions/upload-artifact@v4
         with:
           name: frpc-ios
